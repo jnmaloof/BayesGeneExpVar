@@ -1,0 +1,182 @@
+---
+title: "BayesExpression"
+author: "Julin N Maloof"
+date: "6/21/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+library(brms)
+library(edgeR)
+library(tidyverse)
+```
+
+Want to fit a model where:
+
+* each gene has an intercept
+* each gene has its own variance
+
+```{r}
+counts.data <- read.delim("~/git/BIS180L_web/data/gh_internode_counts.tsv")
+```
+
+```{r}
+sample.description <- data.frame(
+  sample=colnames(counts.data),
+  
+  #This next line searches for IMB211 or R500 in the colnames of counts.data and returns anything that matches
+  #In this way we can extract the genotype info.
+  gt=regmatches(colnames(counts.data),regexpr("R500|IMB211",colnames(counts.data))),
+  
+  #Now we use the same method to get the treatment
+  trt=regmatches(colnames(counts.data),regexpr("NDP|DP",colnames(counts.data)))
+)
+
+# Now we can paste the trt and gt columns together to give a group identifier
+sample.description$group <- paste(sample.description$gt,sample.description$trt,sep="_")
+
+# set the reference treatment to "NDP"
+sample.description$trt <- relevel(sample.description$trt,ref="NDP")
+
+sample.description
+```
+```{r}
+counts.data <- counts.data[rownames(counts.data)!="*",]
+counts.data[is.na(counts.data)] <- 0
+counts.data <- counts.data[rowSums(counts.data > 10) >= 3,]
+dge.data <- DGEList(counts=counts.data, group=sample.description$group)
+dim(dge.data) 
+dge.data <- calcNormFactors(dge.data, method = "TMM")
+dge.data$samples # look at the normalization factors
+```
+
+```{r}
+data.cpm <- as.tibble(cbind(geneID=rownames(cpm(dge.data)),as.tibble(cpm(dge.data)),stringsAsFactors=FALSE))
+colnames(data.cpm) <- sub("\\.1.*","",colnames(data.cpm))
+head(data.cpm)
+```
+
+```{r}
+data.tidy <- data.cpm %>% 
+  gather(sampleID,cpm,-geneID) %>% 
+  separate(sampleID,into=c("gt","trt","rep","tissue"))
+head(data.tidy)
+```
+
+start with just a single sample time
+
+```{r}
+imbdp <- data.tidy %>% filter(gt=="IMB211" & trt=="DP" & startsWith(geneID,"Bra0000"))
+imbdp
+```
+
+```{r}
+hist(imbdp$cpm)
+```
+
+
+```{r}
+get_prior(cpm ~ (1|geneID), data=imbdp)
+get_prior(cpm ~ (1|geneID), family="negbinomial", data=imbdp)
+```
+
+let's start with the Gaussian just to get our head around this
+```{r}
+voom.data <- voom(dge.data)$E
+voom.data <- as.tibble(cbind(geneID=rownames(voom.data),as.tibble(voom.data),stringsAsFactors=FALSE))
+colnames(voom.data) <- sub("\\.1.*","",colnames(voom.data))
+voom.tidy <- voom.data %>% 
+  gather(sampleID,expression,-geneID) %>% 
+  separate(sampleID,into=c("gt","trt","rep","tissue"))
+head(voom.tidy)
+voom.small <- voom.tidy %>% filter(gt=="IMB211" & trt=="DP" & startsWith(geneID,"Bra0000"))
+hist(voom.small$expression)
+```
+
+```{r}
+get_prior(expression ~ (1|geneID), data=voom.tidy)
+```
+
+```{r}
+fit1 <- brm(expression ~ (1|geneID), 
+            prior=c(
+              set_prior("normal(4,2)","Intercept"),
+              set_prior("cauchy(0,1)","sd")),
+            data = voom.small)
+```
+
+```{r}
+fit1
+plot(fit1)
+```
+
+```{r}
+get_prior(bf(expression ~ (1|geneID), sigma ~ (1|geneID)), data=voom.small)
+```
+
+```{r}
+fit2 <- brm(bf(expression ~ (1|geneID), sigma ~ (1|geneID)),
+            prior=c(
+              set_prior("normal(4,2)","Intercept")),
+            data = voom.small)
+
+```
+
+```{r}
+fit2
+plot(fit2)
+```
+
+Let's include the other predictors so that we can get more data points
+
+```{r}
+voom.small2 <- voom.tidy %>% filter(startsWith(geneID,"Bra0000"))
+```
+
+```{r}
+fit3 <- brm(bf(expression ~ (1+gt+trt|geneID), sigma~ (1|geneID)),
+            prior=set_prior("normal(4,2)","Intercept"),
+            data = voom.small2)
+```
+
+```{r}
+fit3
+plot(fit3,ask=FALSE)
+```
+
+```{r}
+ranef(fit3)
+```
+
+```{r}
+fit4 <- brm(bf(expression ~ (1+gt+trt|geneID)),
+            prior=set_prior("normal(4,2)","Intercept"),
+            data = voom.small2)
+```
+
+```{r}
+fit4
+```
+
+```{r}
+waic(fit3,fit4)
+```
+
+```{r}
+fit5 <- brm(bf(expression ~ (1+gt+trt|geneID), sigma ~ geneID),
+            prior=set_prior("normal(4,2)","Intercept"),
+            data = voom.small2)
+```
+
+
+```{r}
+fit5
+```
+
