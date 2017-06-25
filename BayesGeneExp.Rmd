@@ -1,5 +1,5 @@
 ---
-title: "BayesExpression"
+title: "Bayes Expression Variance"
 author: "Julin N Maloof"
 date: "6/21/2017"
 output: html_document
@@ -23,9 +23,17 @@ Want to fit a model where:
 * each gene has an intercept
 * each gene has its own variance
 
+## preliminaries
+
+### get the data
+
+You can also download it [here](http://jnmaloof.github.io/BIS180L_web/data/gh_internode_counts.tsv)
+
 ```{r}
 counts.data <- read.delim("~/git/BIS180L_web/data/gh_internode_counts.tsv")
 ```
+
+### create a data frame that describes the samples
 
 ```{r}
 sample.description <- data.frame(
@@ -47,6 +55,9 @@ sample.description$trt <- relevel(sample.description$trt,ref="NDP")
 
 sample.description
 ```
+
+### normalize counts 
+
 ```{r}
 counts.data <- counts.data[rownames(counts.data)!="*",]
 counts.data[is.na(counts.data)] <- 0
@@ -63,6 +74,8 @@ colnames(data.cpm) <- sub("\\.1.*","",colnames(data.cpm))
 head(data.cpm)
 ```
 
+### rearrange cpm
+
 ```{r}
 data.tidy <- data.cpm %>% 
   gather(sampleID,cpm,-geneID) %>% 
@@ -70,24 +83,9 @@ data.tidy <- data.cpm %>%
 head(data.tidy)
 ```
 
-start with just a single sample time
+## get started
 
-```{r}
-imbdp <- data.tidy %>% filter(gt=="IMB211" & trt=="DP" & startsWith(geneID,"Bra0000"))
-imbdp
-```
-
-```{r}
-hist(imbdp$cpm)
-```
-
-
-```{r}
-get_prior(cpm ~ (1|geneID), data=imbdp)
-get_prior(cpm ~ (1|geneID), family="negbinomial", data=imbdp)
-```
-
-let's start with the Gaussian just to get our head around this
+Start with voom transformed data and Gaussian distribution just to get our head around this
 ```{r}
 voom.data <- voom(dge.data)$E
 voom.data <- as.tibble(cbind(geneID=rownames(voom.data),as.tibble(voom.data),stringsAsFactors=FALSE))
@@ -100,11 +98,14 @@ voom.small <- voom.tidy %>% filter(gt=="IMB211" & trt=="DP" & startsWith(geneID,
 hist(voom.small$expression)
 ```
 
+What priors can we use in standard Gaussian?
 ```{r}
 get_prior(expression ~ (1|geneID), data=voom.tidy)
 ```
 
-```{r}
+### Standard Gaussian model with gene as random effect and non-hierarchical prior for sigma
+
+```{r, results="hide"}
 fit1 <- brm(expression ~ (1|geneID), 
             prior=c(
               set_prior("normal(4,2)","Intercept"),
@@ -117,15 +118,24 @@ fit1
 plot(fit1)
 ```
 
+### Gaussian, assigning different sigmas to different genes (As random effect)
+
+what are the priors that can be set?
 ```{r}
 get_prior(bf(expression ~ (1|geneID), sigma ~ (1|geneID)), data=voom.small)
 ```
 
-```{r}
+Do the fit specifying geneID as a (random) predictor of sigma
+
+Must increase adapt_delta and number of iterations to get good sampling.
+```{r, resluts="hide"}
 fit2 <- brm(bf(expression ~ (1|geneID), sigma ~ (1|geneID)),
             prior=c(
               set_prior("normal(4,2)","Intercept")),
-            data = voom.small)
+            data = voom.small,
+            iter=10000,
+            control=list(adapt_delta=0.99)
+)
 
 ```
 
@@ -134,49 +144,138 @@ fit2
 plot(fit2)
 ```
 
-Let's include the other predictors so that we can get more data points
+### Compare models with and without hiearchical prior for sigma:
 
 ```{r}
-voom.small2 <- voom.tidy %>% filter(startsWith(geneID,"Bra0000"))
+loo(fit1,fit2)
+```
+lower LOOIC is better, so there is strong evidence that having a hierarchical prior on sigma provides a better model fit.
+
+### explore the fitted parameters
+
+Get the estimated sigmas for each gene:
+
+```{r}
+str(ranef(fit2)) #we want the second one
+# also, to get back on the original scale we need to take the exponential: see vignette("brms_distreg")
+sigma.gene <- ranef(fit2)[[2]]
+hist(sigma.gene) #how much the log_sigma is being adjusted for each gene
+hist(exp(sigma.gene)) #in sd units
+hist(exp(sigma.gene+fixef(fit2)["sigma_Intercept",])) #actual sigma being used for each gene
+```
+
+To test whether an individual gene has higher standard deviation than average:
+```{r}
+hypothesis(fit2,"exp(r_geneID__sigma[Bra000002,Intercept] + b_sigma_Intercept) > exp(b_sigma_Intercept) ",class=NULL)
+
+```
+
+For all genes:
+
+First define the tests we want to do
+```{r}
+tests <- parnames(fit2) %>% 
+  grep("r_geneID__sigma", . ,value=TRUE) %>%
+  paste("exp(", . ," + b_sigma_Intercept) > exp(b_sigma_Intercept)", sep="")
+head(tests)
+```
+
+run the test
+```{r}
+test.results <- hypothesis(fit2,tests,class=NULL)
+```
+
+look at the results
+```{r}
+rownames(test.results$hypothesis) <- rownames(test.results$hypothesis) %>%
+  regmatches(. , regexpr("Bra[0-9]*",.)) 
+test.results
+```
+
+## Reality check: plot the data
+
+separate into different facets for the genes with "significantly" higher variance.  Center (but don't scale) to make for easier viewing.
+```{r}
+voom.small$Star <- test.results$hypothesis[voom.small$geneID,"Star"]
+pl <- voom.small %>%
+  filter(!is.na(Star)) %>%
+  group_by(geneID) %>%
+  mutate(centered=expression-mean(expression)) %>%
+  ggplot(aes(x=geneID,y=centered,shape=Star,color=Star)) +
+  geom_point() +
+  facet_wrap(~ Star, scales="free_x")
+pl
+```
+
+__Looks good!__
+
+
+## Next steps
+
+* Incorporate genotype and treatment samples
+* Learn more about how the negative binomial should be fit, especially w.r.t cpm.
+
+# Code below here not working, do not run
+
+
+
+
+## starting with neg binomial
+
+start with just a single sample type
+
+```{r}
+imbdp <- data.tidy %>% filter(gt=="IMB211" & trt=="DP" & startsWith(geneID,"Bra0000"))
+imbdp
 ```
 
 ```{r}
-fit3 <- brm(bf(expression ~ (1+gt+trt|geneID), sigma~ (1|geneID)),
-            prior=set_prior("normal(4,2)","Intercept"),
-            data = voom.small2)
+hist(imbdp$cpm)
 ```
 
 ```{r}
-fit3
-plot(fit3,ask=FALSE)
+get_prior(cpm ~ (1|geneID), family="negbinomial", data=imbdp)
+```
+
+### Fit standard negative binomial model
+
+Intercept (i.e. expression level) varies as a function of geneID (as a random effect)
+
+```{r}
+imbdp$cpm.round <- round(imbdp$cpm,0) # maybe I shouldn't be using cpm at all
+fit3 <- brm(cpm.round ~ (1 | geneID),family="negbinomial",
+            prior=set_prior("normal(5,5)", "Intercept"),
+            data=imbdp,
+            iter=10000)
 ```
 
 ```{r}
-ranef(fit3)
+fit3 
+plot(fit3)
 ```
 
-```{r}
-fit4 <- brm(bf(expression ~ (1+gt+trt|geneID)),
-            prior=set_prior("normal(4,2)","Intercept"),
-            data = voom.small2)
+```{r,eval=FALSE}
+get_prior(bf(cpm.round ~ (1 | geneID),shape ~ (1|geneID)),family="negbinomial",data=imbdp)
 ```
 
-```{r}
+
+```{r,eval=FALSE}
+fit4 <- brm(bf(cpm.round ~ (1 | geneID),shape ~ (1|geneID)),
+            family="negbinomial",
+            prior=set_prior("normal(5,5)", "Intercept"),
+            data=imbdp,
+            iter=2000,
+            control = list(max_treedepth = 20))
+```
+
+```{r,eval=FALSE}
 fit4
-```
-
-```{r}
-waic(fit3,fit4)
-```
-
-```{r}
-fit5 <- brm(bf(expression ~ (1+gt+trt|geneID), sigma ~ geneID),
-            prior=set_prior("normal(4,2)","Intercept"),
-            data = voom.small2)
+plot(fit4)
 ```
 
 
-```{r}
-fit5
+```{r,eval=FALSE}
+loo(fit3,fit4)
 ```
+
 
