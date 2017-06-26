@@ -94,8 +94,9 @@ voom.tidy <- voom.data %>%
   gather(sampleID,expression,-geneID) %>% 
   separate(sampleID,into=c("gt","trt","rep","tissue"))
 head(voom.tidy)
-voom.small <- voom.tidy %>% filter(gt=="IMB211" & trt=="DP" & startsWith(geneID,"Bra0000"))
+voom.small <- voom.tidy %>% filter(gt=="IMB211" & trt=="DP" & startsWith(geneID,"Bra000"))
 hist(voom.small$expression)
+dim(voom.small)
 ```
 
 What priors can we use in standard Gaussian?
@@ -106,11 +107,14 @@ get_prior(expression ~ (1|geneID), data=voom.tidy)
 ### Standard Gaussian model with gene as random effect and non-hierarchical prior for sigma
 
 ```{r, results="hide"}
-fit1 <- brm(expression ~ (1|geneID), 
+system.time(fit1 <- brm(expression ~ (1|geneID), 
             prior=c(
-              set_prior("normal(4,2)","Intercept"),
-              set_prior("cauchy(0,1)","sd")),
-            data = voom.small)
+              set_prior("normal(4,1)","Intercept"),
+              set_prior("cauchy(0,1)","sd"),
+              set_prior("cauchy(0,1)","sigma")
+              ),
+            data = voom.small,
+            iter=10000))
 ```
 
 ```{r}
@@ -129,13 +133,15 @@ Do the fit specifying geneID as a (random) predictor of sigma
 
 Must increase adapt_delta and number of iterations to get good sampling.
 ```{r, resluts="hide"}
-fit2 <- brm(bf(expression ~ (1|geneID), sigma ~ (1|geneID)),
+system.time(fit2 <- brm(bf(expression ~ (1|geneID), sigma ~ (1|geneID)),
             prior=c(
-              set_prior("normal(4,2)","Intercept")),
+              set_prior("normal(4,1)","Intercept"),
+              set_prior("student_t(3,0,1)","sd")),
             data = voom.small,
             iter=10000,
-            control=list(adapt_delta=0.99)
-)
+            warmup = 2000,
+            control=list(adapt_delta=0.95)
+))
 
 ```
 
