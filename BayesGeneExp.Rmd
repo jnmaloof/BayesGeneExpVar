@@ -94,7 +94,7 @@ voom.tidy <- voom.data %>%
   gather(sampleID,expression,-geneID) %>% 
   separate(sampleID,into=c("gt","trt","rep","tissue"))
 head(voom.tidy)
-voom.small <- voom.tidy %>% filter(gt=="IMB211" & trt=="DP" & startsWith(geneID,"Bra000"))
+voom.small <- voom.tidy %>% filter(gt=="IMB211" & trt=="DP" & startsWith(geneID,"Bra0000"))
 hist(voom.small$expression)
 dim(voom.small)
 ```
@@ -110,8 +110,8 @@ get_prior(expression ~ (1|geneID), data=voom.tidy)
 system.time(fit1 <- brm(expression ~ (1|geneID), 
             prior=c(
               set_prior("normal(4,1)","Intercept"),
-              set_prior("cauchy(0,1)","sd"),
-              set_prior("cauchy(0,1)","sigma")
+              set_prior("student_t(3,0,1)","sd"),
+              set_prior("student_t(3,0,1)","sigma")
               ),
             data = voom.small,
             iter=10000))
@@ -170,10 +170,23 @@ hist(exp(sigma.gene)) #in sd units
 hist(exp(sigma.gene+fixef(fit2)["sigma_Intercept",])) #actual sigma being used for each gene
 ```
 
+Get the estimated mean expression for each gene
+```{r}
+mean.gene <- ranef(fit2)[[1]] + fixef(fit2)["Intercept",]
+```
+
+Is there a relationship between expression level and standard deviation?  We hope that voom took care of this:
+
+```{r}
+mean.var <- data.frame(mean=mean.gene,sigma=exp(sigma.gene+fixef(fit2)["sigma_Intercept",]))
+colnames(mean.var) <- c("mean","sigma")
+ggplot(mean.var,aes(x=mean,y=sigma)) + geom_point() + geom_smooth()
+```
+Seems reasonable; no strong trend
+
 To test whether an individual gene has higher standard deviation than average:
 ```{r}
 hypothesis(fit2,"exp(r_geneID__sigma[Bra000002,Intercept] + b_sigma_Intercept) > exp(b_sigma_Intercept) ",class=NULL)
-
 ```
 
 For all genes:
@@ -195,7 +208,7 @@ look at the results
 ```{r}
 rownames(test.results$hypothesis) <- rownames(test.results$hypothesis) %>%
   regmatches(. , regexpr("Bra[0-9]*",.)) 
-test.results
+head(test.results,30)
 ```
 
 ## Reality check: plot the data
@@ -213,13 +226,177 @@ pl <- voom.small %>%
 pl
 ```
 
-__Looks good!__
-
 
 ## Next steps
 
 * Incorporate genotype and treatment samples
 * Learn more about how the negative binomial should be fit, especially w.r.t cpm.
+
+# Now include multiple conditions...
+
+60 genes, both two genotypes, two conditions
+```{r}
+voom.small2 <- voom.tidy %>% filter(startsWith(geneID,"Bra0000"))
+hist(voom.small2$expression)
+dim(voom.small2)
+```
+
+fit the interaction model
+```{r, message=FALSE}
+system.time(fit3 <- brm(bf(expression ~ (gt*trt|geneID), sigma ~ (1|geneID)),
+            prior=c(
+              set_prior("normal(4,1)","Intercept"),
+              set_prior("student_t(3,0,1)","sd")),
+            data = voom.small2,
+            iter=10000,
+            warmup = 2000,
+            control=list(adapt_delta=0.95)
+))
+```
+
+```{r}
+fit3
+```
+
+fit the additive model
+```{r, message=FALSE}
+system.time(fit4 <- brm(bf(expression ~ (gt+trt|geneID), sigma ~ (1|geneID)),
+            prior=c(
+              set_prior("normal(4,1)","Intercept"),
+              set_prior("student_t(3,0,1)","sd")),
+            data = voom.small2,
+            iter=10000,
+            warmup = 2000,
+            control=list(adapt_delta=0.95)
+))
+```
+
+```{r}
+fit4
+```
+
+```{r}
+loo(fit3,fit4)
+```
+
+Might as well go with the simpler model, not much difference.
+
+test for importance of variable sigma per gene:
+
+```{r}
+system.time(fit5 <- brm(bf(expression ~ (gt+trt|geneID)),
+            prior=c(
+              set_prior("normal(4,1)","Intercept"),
+              set_prior("student_t(3,0,1)","sd"),
+              set_prior("student_t(3,0,1)","sigma")
+              ),
+            data = voom.small2,
+            iter=10000,
+            warmup = 2000,
+            control=list(adapt_delta=0.95)
+))
+```
+
+```{r}
+fit5
+```
+
+```{r}
+loo(fit4,fit5)
+```
+
+Fit 4 (with the gene-specific variance) is strongly preferred.
+
+### explore the fitted parameters
+
+Get the estimated sigmas for each gene:
+
+```{r}
+str(ranef(fit4)) #we want the second one
+# also, to get back on the original scale we need to take the exponential: see vignette("brms_distreg")
+sigma.gene2 <- ranef(fit4)[[2]]
+hist(sigma.gene2) #how much the log_sigma is being adjusted for each gene
+hist(exp(sigma.gene2)) #in sd units
+hist(exp(sigma.gene2+fixef(fit4)["sigma_Intercept",])) #actual sigma being used for each gene
+```
+
+Get the estimated mean expression for each gene __note that this is only for the "reference" conditions, which in this case is gtIMB211 and trtDP
+```{r}
+mean.gene2 <- ranef(fit4)[[1]][,"Intercept"] + fixef(fit4)["Intercept",]
+```
+
+Is there a relationship between expression level and standard deviation?  We hope that voom took care of this:
+
+```{r}
+mean.var2 <- data.frame(mean=mean.gene2,sigma=exp(sigma.gene2+fixef(fit4)["sigma_Intercept",]))
+colnames(mean.var2) <- c("mean","sigma")
+ggplot(mean.var2,aes(x=mean,y=sigma)) + geom_point() + geom_smooth()
+```
+Seems reasonable; no strong trend
+
+To test whether an individual gene has higher standard deviation than average:
+```{r}
+hypothesis(fit4,"exp(r_geneID__sigma[Bra000002,Intercept] + b_sigma_Intercept) > exp(b_sigma_Intercept) ",class=NULL)
+```
+
+For all genes:
+
+First define the tests we want to do
+```{r}
+tests2 <- parnames(fit4) %>% 
+  grep("r_geneID__sigma", . ,value=TRUE) %>%
+  paste("exp(", . ," + b_sigma_Intercept) > exp(b_sigma_Intercept)", sep="")
+head(tests2)
+```
+
+run the test
+```{r}
+test.results2 <- hypothesis(fit4,tests,class=NULL)
+```
+
+look at the results
+```{r}
+rownames(test.results2$hypothesis) <- rownames(test.results2$hypothesis) %>%
+  regmatches(. , regexpr("Bra[0-9]*",.)) 
+head(test.results2,30)
+```
+
+## Reality check: plot the data
+
+separate into different facets for the genes with "significantly" higher variance.  Center (but don't scale) to make for easier viewing.
+
+compare "stars" for the two data sets (note: same genes but many more samples and conditions for the second 2)
+```{r,fig.width=12}
+voom.small2$Star <- test.results$hypothesis[voom.small2$geneID,"Star"]
+voom.small2$Star2 <- test.results2$hypothesis[voom.small2$geneID,"Star"]
+
+voom.small2$Stars <- ifelse(voom.small2$Star == "*" & voom.small2$Star2 == "*", "both", 
+                            ifelse(voom.small2$Star == "*", "small data",
+                                   ifelse(voom.small2$Star2 == "*", "large data", "neither")))
+
+pl <- voom.small2 %>%
+  filter(!is.na(Star)) %>%
+  group_by(geneID,gt,trt) %>%
+  mutate(centered=expression-mean(expression)) %>%
+  ggplot(aes(x=geneID,y=centered,shape=Stars,color=Stars)) +
+  geom_point() +
+  facet_grid(gt ~ trt)
+pl
+```
+
+Interesting...there is definitly condition dependence on the variance.  I wonder if that is due to expression level differences between the conditions or something else?
+
+Plot it without centering:
+
+```{r,fig.width=12}
+pl <- voom.small2 %>%
+  filter(!is.na(Star)) %>%
+  ggplot(aes(x=geneID,y=expression,shape=Stars,color=Stars)) +
+  geom_point() +
+  facet_grid(gt ~ trt)
+pl
+```
+
 
 # Code below here not working, do not run
 
@@ -230,16 +407,16 @@ __Looks good!__
 
 start with just a single sample type
 
-```{r}
+```{r, eval=FALSE}
 imbdp <- data.tidy %>% filter(gt=="IMB211" & trt=="DP" & startsWith(geneID,"Bra0000"))
 imbdp
 ```
 
-```{r}
+```{r,eval=FALSE}
 hist(imbdp$cpm)
 ```
 
-```{r}
+```{r,eval=FALSE}
 get_prior(cpm ~ (1|geneID), family="negbinomial", data=imbdp)
 ```
 
@@ -247,7 +424,7 @@ get_prior(cpm ~ (1|geneID), family="negbinomial", data=imbdp)
 
 Intercept (i.e. expression level) varies as a function of geneID (as a random effect)
 
-```{r}
+```{r, eval=FALSE}
 imbdp$cpm.round <- round(imbdp$cpm,0) # maybe I shouldn't be using cpm at all
 fit3 <- brm(cpm.round ~ (1 | geneID),family="negbinomial",
             prior=set_prior("normal(5,5)", "Intercept"),
@@ -255,7 +432,7 @@ fit3 <- brm(cpm.round ~ (1 | geneID),family="negbinomial",
             iter=10000)
 ```
 
-```{r}
+```{r, eval=FALSE}
 fit3 
 plot(fit3)
 ```
