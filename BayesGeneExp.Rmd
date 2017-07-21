@@ -227,12 +227,7 @@ pl
 ```
 
 
-## Next steps
-
-* Incorporate genotype and treatment samples
-* Learn more about how the negative binomial should be fit, especially w.r.t cpm.
-
-# Now include multiple conditions...
+# Now try including multiple conditions...
 
 60 genes, both two genotypes, two conditions
 ```{r}
@@ -396,6 +391,12 @@ pl <- voom.small2 %>%
   facet_grid(gt ~ trt)
 pl
 ```
+
+
+## Next steps
+
+* SHOULD I BE SPECIFIYING CONDITIONS IN THE FORMULA FOR SIGMA?
+* Learn more about how the negative binomial should be fit, especially w.r.t cpm.
 
 
 # Code below here not working, do not run
